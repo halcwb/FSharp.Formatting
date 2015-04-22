@@ -11,7 +11,8 @@ open FSharp.Patterns
 open FSharp.CodeFormat
 open FSharp.Markdown
 
-module internal Transformations = 
+/// [omit]
+module Transformations = 
   // ----------------------------------------------------------------------------------------------
   // Replace all code snippets (assume F#) with their nicely formatted versions
   // ----------------------------------------------------------------------------------------------
@@ -208,7 +209,7 @@ module internal Transformations =
   // ----------------------------------------------------------------------------------------------
 
   /// Represents key in a dictionary with evaluation results
-  type internal EvalKey = OutputRef of string | ValueRef of string
+  type EvalKey = OutputRef of string | ValueRef of string
    
   /// Unparse a Line list to a string - for evaluation by fsi.
   let unparse (lines: Line list) =
@@ -327,9 +328,29 @@ module internal Transformations =
             let inlined = 
               match ctx.OutputKind with
               | OutputKind.Html ->
-                  let code = HttpUtility.HtmlEncode code
                   let code = SyntaxHighlighter.FormatCode(lang, code)
-                  sprintf "<table class=\"pre\"><tr><td><pre lang=\"%s\">%s</pre></td></tr></table>" lang code
+                  
+                  let sb = new System.Text.StringBuilder()
+                  let writer = new System.IO.StringWriter(sb)
+                  writer.Write("<table class=\"pre\">")
+                  writer.Write("<tr>")
+                  if ctx.GenerateLineNumbers then 
+                    // Split the formatted code into lines & emit line numbers in <td>
+                    // (Similar to formatSnippets in FSharp.CodeFormat\HtmlFormatting.fs)
+                    let lines = code.Trim('\r', '\n').Replace("\r\n", "\n").Replace("\n\r", "\n").Replace("\r", "\n").Split('\n')
+                    let numberLength = lines.Length.ToString().Length
+                    let linesLength = lines.Length
+                    writer.Write("<td class=\"lines\">")
+                    for index in 0..linesLength-1 do
+                      let lineStr = (index + 1).ToString().PadLeft(numberLength)
+                      writer.WriteLine("<span class=\"l\">{0}: </span>", lineStr)
+                    writer.WriteLine("</td>")
+
+                  writer.Write("<td class=\"snippet\">")
+                  Printf.fprintf writer "<pre lang=\"%s\">%s</pre>" lang code
+                  writer.Write("</td></tr></table>")
+                  sb.ToString()
+
               | OutputKind.Latex ->
                   sprintf "\\begin{lstlisting}\n%s\n\\end{lstlisting}" code
             Some(InlineBlock(inlined))

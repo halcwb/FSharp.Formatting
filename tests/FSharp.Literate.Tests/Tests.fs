@@ -59,6 +59,16 @@ let test = 42"""
   doc.Paragraphs |> shouldMatchPar (function
     | Paragraph [Strong [Literal "hello"]] -> true | _ -> false) 
 
+[<Test>]
+let ``Can parse heading on the same line as opnening comment (#147)`` () =
+  let content = """
+(** ## Heading
+content *)
+let test = 42"""
+  let doc = Literate.ParseScriptString(content, "C" @@ "A.fsx", getFormatAgent())
+  doc.Paragraphs |> shouldMatchPar (function
+    | Heading(2, [Literal "Heading"]) -> true | _ -> false)
+
 [<Test>] 
 let ``Can parse and format markdown with F# snippet`` () =
   let content = """
@@ -147,10 +157,77 @@ var a = 10 < 10;
 [<Test>]
 let ``Codeblock whitespace is preserved`` () =
   let doc = "```markup\r\n    test\r\n    blub\r\n```\r\n";
-  let expected = "<table class=\"pre\"><tr><td><pre lang=\"markup\">    test\r\n    blub\r\n</pre></td></tr></table>\r\n" |> properNewLines;
+  let expected = "<pre lang=\"markup\">    test\r\n    blub\r\n</pre>" |> properNewLines;
   let doc = Literate.ParseMarkdownString(doc, formatAgent=getFormatAgent())
   let html = Literate.WriteHtml(doc)
   html |> should contain expected
+
+[<Test>]
+let ``Correctly handles Norwegian letters in SQL code block (#249)`` () =
+  let content = """
+    [lang=sql]
+    Æøå"""
+  let doc = Literate.ParseMarkdownString(content, formatAgent=getFormatAgent())
+  let html = Literate.WriteHtml(doc)
+  html |> should contain ">Æøå<"
+
+[<Test>]
+let ``Correctly handles apostrophes in JS code block (#213)`` () =
+  let content = """
+    [lang=js]
+    var but = 'I\'m not so good...';"""
+  let doc = Literate.ParseMarkdownString(content, formatAgent=getFormatAgent())
+  let html = Literate.WriteHtml(doc)
+  html |> should contain @"'I\'m not so good...'"
+
+[<Test>]
+let ``Correctly encodes special HTML characters (<, >, &) in code`` () =
+  let content = """
+    [lang=js]
+    var pre = "<a> & <b>";"""
+  let doc = Literate.ParseMarkdownString(content, formatAgent=getFormatAgent())
+  let html = Literate.WriteHtml(doc)
+  html |> should contain "&lt;a&gt; &amp; &lt;b&gt;"
+
+[<Test>]
+let ``Correctly encodes already encoded HTML entities and tags`` () =
+  let content = """
+    [lang=js]
+    "&amp;" + "<em>" + "&quot;"; """
+  let doc = Literate.ParseMarkdownString(content, formatAgent=getFormatAgent())
+  let html = Literate.WriteHtml(doc)
+  html |> should contain "&amp;amp;"
+  html |> should contain "&amp;quot;"
+  html |> should contain "&lt;em&gt;"
+
+[<Test>]
+let ``Generates line numbers for F# code snippets`` () =
+  let content = """
+(** Hello *)
+let a1 = 1
+let a2 = 2"""
+  let doc = Literate.ParseScriptString(content, formatAgent=getFormatAgent())
+  let html = Literate.WriteHtml(doc, lineNumbers=true)
+  html |> should contain "<p>Hello</p>"
+  html |> should contain "1:"
+  html |> should contain "2:"
+  html |> should notContain "3:"
+
+[<Test>]
+let ``Generates line numbers for non-F# code snippets`` () =
+  let content = """
+(** Hello
+
+```csharp
+var a1 = 1;
+var a2 = 2;
+``` *)"""
+  let doc = Literate.ParseScriptString(content, formatAgent=getFormatAgent())
+  let html = Literate.WriteHtml(doc, lineNumbers=true)
+  html |> should contain "<p>Hello</p>"
+  html |> should contain "1:"
+  html |> should contain "2:"
+  html |> should notContain "3:"
 
 // --------------------------------------------------------------------------------------
 // Test that parsed documents for Markdown and F# #scripts are the same

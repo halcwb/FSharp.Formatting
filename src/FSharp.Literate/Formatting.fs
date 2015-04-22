@@ -10,7 +10,9 @@ open FSharp.Markdown
 // --------------------------------------------------------------------------------------
 // Processing Markdown documents
 // --------------------------------------------------------------------------------------
-module internal Formatting =
+
+/// [omit]
+module Formatting =
 
   /// Format document with the specified output kind
   let format doc generateAnchors outputKind = 
@@ -48,7 +50,8 @@ module internal Formatting =
 // Generates file using HTML or CSHTML (Razor) template
 // --------------------------------------------------------------------------------------
 
-module internal Templating =
+/// [omit]
+module Templating =
 
   /// Replace {parameter} in the input string with 
   /// values defined in the specified list
@@ -73,7 +76,7 @@ module internal Templating =
   let private generateFile references contentTag parameters templateOpt output layoutRoots =
     match templateOpt with
     | Some (file:string) when file.EndsWith("cshtml", true, CultureInfo.InvariantCulture) -> 
-        let razor = RazorRender(layoutRoots |> Seq.toList, [], Path.GetFileNameWithoutExtension file, ?references = references)
+        let razor = RazorRender(layoutRoots |> Seq.toList, [], file, ?references = references)
         let props = [ "Properties", dict parameters ]
         let generated = razor.ProcessFile(props)
         File.WriteAllText(output, generated)      
