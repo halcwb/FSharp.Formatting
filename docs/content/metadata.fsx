@@ -6,7 +6,7 @@ F# Formatting: Library documentation
 ====================================
 
 The library `FSharp.MetadataFormat.dll` is a replacement for the `FsHtmlTool`
-which is available in F# PowerPack and can be used to generate documentation 
+which is available in the F# PowerPack and can be used to generate documentation 
 for F# libraries with XML comments. The F# Formatting re-implementation has
 a couple of extensions:
 
@@ -26,7 +26,7 @@ open System.IO
 (**
 Building the library documentation is easy - you just need to call
 `MetadataFormat.Generate` from your FAKE script or from F# Interactive.
-The method takes three (required) parameters - the path to your `dll`,
+The method takes three (required) parameters - the path to your `DLL`,
 output directory and directory with Razor templates.
 Assuming `root` is the root directory for your project, you can write:
 *)
@@ -41,7 +41,7 @@ Adding Go to GitHub source links
 -----------------
 You can automatically add GitHub links to each functions, values and class members for further reference.
 You need to specify two more arguments: `sourceRepo` to the GitHub repository 
-and `sourceFolder` to the folder where your dlls are built.
+and `sourceFolder` to the folder where your DLLs are built.
 It is assumed that `sourceRepo` and `sourceFolder` have synchronized contents.
 *)
 
@@ -52,6 +52,55 @@ MetadataFormat.Generate
     sourceRepo = "https://github.com/tpetricek/FSharp.Formatting/tree/master",
     sourceFolder = "/path/to/FSharp.Formatting" )
     
+
+(**
+Adding cross-type links to modules and types in the same assembly
+-----------------
+You can automatically add cross-type links to the documentation pages of other modules and types in the same assembly.
+You can do this in two different ways:
+* Add a [markdown inline link](https://github.com/adam-p/markdown-here/wiki/Markdown-Cheatsheet#links) were the link
+title is the name of the type you want to link.
+
+
+     /// this will generate a link to [Foo.Bar] documentation
+
+
+* Add a [Markdown inlide code](https://github.com/adam-p/markdown-here/wiki/Markdown-Cheatsheet#code) (using
+back-ticks) where the code is the name of the type you want to link.
+
+
+     /// This will also generate a link to `Foo.Bar` documentation
+
+
+You can use either the full name (including namespace and module) or the simple name of a type.
+If more than one type is found with the same name the link will not be generated.
+If a type with the given name is not found in the same assembly the link will not be generated.
+*)
+
+/// Contains two types [Bar] and [Foo.Baz]
+module Foo = 
+    
+    /// Bar is just an `int` and belongs to module [Foo]
+    type Bar = int
+    
+    /// Baz contains a `Foo.Bar` as its `id`
+    type Baz = { id: Bar }
+
+    /// This function operates on `Baz` types.
+    let f (b:Baz) = 
+        b.id * 42
+
+/// Referencing [Foo3] will not generate a link as there is no type with the name `Foo3`
+module Foo2 =
+    
+    /// This is not the same type as `Foo.Bar`
+    type Bar = double
+
+    /// Using the simple name for [Bar] will fail to create a link because the name is duplicated in 
+    /// [Foo.Bar] and in [Foo2.Bar]. In this case, using the full name works.
+    let f2 b =
+         b * 50
+
 (**
 Excluding APIs from the docs
 -----------------
@@ -79,7 +128,7 @@ MetadataFormat.Generate
     sourceRepo = "https://github.com/tpetricek/FSharp.Formatting/tree/master",
     sourceFolder = "/path/to/FSharp.Formatting", markDownComments = false )
 (**
-Example of XML documentation comment.
+An example of an XML documentation comment:
 *)
 /// <summary>
 /// Some actual comment
@@ -89,7 +138,7 @@ module Foo =
    let a = 42
 (**
 Note that currently our code is not handling `<parameter>` and `<result> tags, this is 
-not so much of a problem given that given that FSharp.Formatting infers the signature via reflection.
+not so much of a problem given that FSharp.Formatting infers the signature via reflection.
 
 
 ## Optional parameters
@@ -117,7 +166,7 @@ parameters that can be used to tweak how the formatting works:
     if you need additional references in your templates
     (if not specified, we use the currently loaded assemblies).
   - `sourceFolder` and `sourceRepo` - When specified, the documentation generator automatically
-    generates links to GitHub pages for each of the entity.
+    generates links to GitHub pages for each entity.
   - `publicOnly` - When set to `false`, the tool will also generate documentation for non-public members
   - `libDirs` - Use this to specify additional paths where referenced DLL files can be found
   - `otherFlags` - Additional flags that are passed to the F# compiler (you can use this if you want to 

@@ -1,8 +1,10 @@
 F# Formatting [![Build Status](https://travis-ci.org/tpetricek/FSharp.Formatting.png?branch=master)](https://travis-ci.org/tpetricek/FSharp.Formatting)
 =================================
+
+[![Join the chat at https://gitter.im/tpetricek/FSharp.Formatting](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/tpetricek/FSharp.Formatting?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
  
 The F# Formatting libraries (`FSharp.CodeFormat.dll` and `FSharp.Markdown.dll`) include an F# implementation 
-of Markdown parser and F# code formatter that can be used to tokenize F# code and obtain information about tokens 
+of a Markdown parser and an F# code formatter that can be used to tokenize F# code and obtain information about tokens 
 including tool-tips (as in Visual Studio and MonoDevelop) with type information. The library also comes with 
 a sample that implements literate programming for F#.
 

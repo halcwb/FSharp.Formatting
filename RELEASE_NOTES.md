@@ -1,8 +1,61 @@
+## 2.12.0 (18 October, 2015)
+ - Update dependencies to be compatible with FSharp.Compiler.Service >=1.4.0.3
+
+## 2.11.1-alpha1 (14 October, 2015)
+ - Adds methods for cross-type links #330 (https://github.com/tpetricek/FSharp.Formatting/pull/330)
+
+## 2.11.0 (28 September, 2015)
+ - Fix https://github.com/tpetricek/FSharp.Formatting/issues/271
+ - Don't fail as long as we can recover / continue.
+ - Fix https://github.com/tpetricek/FSharp.Formatting/issues/201
+
+## 2.10.3 (12 September, 2015)
+ - Require compatible F# Compiler Service in Nuspec (fix #337)
+
+## 2.10.2 (12 September, 2015)
+ - Fix load script (wrap logging setup in try catch properly)
+ 
+## 2.10.1 (12 September, 2015)
+ - paket update && fix compilation (#338)
+ - Wrap logging setup in try catch 
+ 
+## 2.10.0 (26 July, 2015)
+ - Add detailed logging and new FSharp.Formatting.Common.dll file
+ - Fix bug in C# code formatting tool (FormatHtml)
+
+## 2.9.10 (27 June, 2015)
+ - Support multiple snippets in Literate.Parse (This is obsolete, but needed for www.fssnip.net.)
+
+## 2.9.9 (22 June, 2015)
+ - Fix HTML escaping of code blocks with unknown languages (#321, #322)
+
+## 2.9.6 (8 May, 2015)
+ - Generate 'fssnip' class for non-F# <pre> tags for consistency
+
+## 2.9.5 (6 May, 2015)
+ - Provide an option to disable `fsi.AddPrinter` (#311)
+ - Generated line numbers for HTML are the same for F# and non-F#
+
+## 2.9.4 (30 April, 2015)
+ - Use `otherFlags` parameter (#308)
+ - Format code in Markdown comments (#307, #36)
+
+## 2.9.3 (29 April, 2015)
+ - Simplify using FCS interaction using Yaaf.Scripting (#305)
+ - Do not load dependencies when initializing evaluator
+ - Undo require exact version of F# Compiler Service
+
+## 2.9.2 (24 April, 2015)
+ - Require exact version of F# Compiler Service
+
+## 2.9.1 (21 April, 2015)
+ - Add back RazorEngine.dll (#302)
+
 ## 2.9.0 (20 April, 2015)
  - Properly encode '>' entities (#84)
  - Generate line numbers for non-F# code (#227)
  - Support headings on the same line as comment (#147)
- - Fixes in HTML encoding of non-F# code snippets (#249, #213) 
+ - Fixes in HTML encoding of non-F# code snippets (#249, #213)
  - Remove Razor mono workaround (#279)
  - Add a public API to process a customized LiterateDocument (#282)
  - Add an API to process a customized LiterateDocument (#289)

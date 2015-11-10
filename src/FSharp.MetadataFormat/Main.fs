@@ -3,9 +3,12 @@
 open System
 open System.Reflection
 open System.Collections.Generic
+open Yaaf.FSharp.Scripting
 open Microsoft.FSharp.Compiler.SourceCodeServices
 open Microsoft.FSharp.Compiler.Range
+open FSharp.Formatting.Common
 open FSharp.Patterns
+open FSharp.CodeFormat
 
 open System.Text
 open System.IO
@@ -127,15 +130,27 @@ type AssemblyGroup =
 
 type ModuleInfo = 
   { Module : Module
-    Assembly : AssemblyGroup }
-  static member Create(modul, asm) = 
-    { ModuleInfo.Module = modul; Assembly = asm }
+    Assembly : AssemblyGroup
+    Namespace : Namespace
+    ParentModule : Module option }
+  member this.HasParentModule = this.ParentModule.IsSome
+  static member Create(modul, asm, ns, parent) = 
+    { ModuleInfo.Module = modul; Assembly = asm; Namespace = ns; ParentModule = parent }
 
 type TypeInfo = 
   { Type : Type
-    Assembly : AssemblyGroup }
-  static member Create(typ, asm) = 
-    { TypeInfo.Type = typ; Assembly = asm }
+    Assembly : AssemblyGroup
+    Namespace : Namespace
+    ParentModule : Module option }
+  member this.HasParentModule = this.ParentModule.IsSome
+  static member Create(typ, asm, ns, modul) = 
+    { TypeInfo.Type = typ; Assembly = asm; Namespace = ns; ParentModule = modul }
+
+/// [omit]
+[<System.Runtime.CompilerServices.Extension>]
+module ExtensionMethods =
+   [<System.Runtime.CompilerServices.Extension>]
+   let Exists(opt : Module option) = opt.IsSome
 
 module ValueReader = 
   open System.Collections.ObjectModel
@@ -153,19 +168,27 @@ module ValueReader =
       UrlMap : IUrlHolder
       MarkdownComments : bool
       UrlRangeHighlight : Uri -> int -> int -> string
-      SourceFolderRepository : (string * string) option }
+      SourceFolderRepository : (string * string) option 
+      AssemblyPath : string
+      CompilerOptions : string
+      FormatAgent : CodeFormatAgent }
     member x.XmlMemberLookup(key) =
       match x.XmlMemberMap.TryGetValue(key) with
       | true, v -> Some v
       | _ -> None 
-    static member Create(publicOnly, assembly, map, sourceFolderRepo, urlRangeHighlight, markDownComments, urlMap) = 
+    static member Create
+        ( publicOnly, assembly, map, sourceFolderRepo, urlRangeHighlight, markDownComments, urlMap,
+          assemblyPath, compilerOptions, formatAgent ) = 
       { PublicOnly=publicOnly;
         Assembly = assembly
         XmlMemberMap = map; 
         MarkdownComments = markDownComments; 
         UrlMap = urlMap; 
         UrlRangeHighlight = urlRangeHighlight; 
-        SourceFolderRepository = sourceFolderRepo }
+        SourceFolderRepository = sourceFolderRepo 
+        AssemblyPath = assemblyPath
+        CompilerOptions = compilerOptions
+        FormatAgent = formatAgent }
 
   let formatSourceLocation (urlRangeHighlight : Uri -> int -> int -> string) (sourceFolderRepo : (string * string) option) (location : range option) =
     location |> Option.bind (fun location ->
@@ -176,7 +199,7 @@ module ValueReader =
             // Even though ignoring case might be wrong, we do that because
             // one path might be file:///C:\... and the other file:///c:\...  :-(
             if not <| docPath.StartsWith(basePath, StringComparison.InvariantCultureIgnoreCase) then
-                Log.logf "Error occurs. Current source file '%s' doesn't reside in source folder '%s'" docPath basePath
+                Log.errorf "Current source file '%s' doesn't reside in source folder '%s'" docPath basePath
                 ""
             else
                 let relativePath = docPath.[basePath.Length..]
@@ -191,7 +214,7 @@ module ValueReader =
   let uncapitalize (s:string) =
     s.Substring(0, 1).ToLowerInvariant() + s.Substring(1)
 
-  let isAttrib<'T> (attrib: FSharpAttribute)  =
+  let isAttrib<'T> (attrib: FSharpAttribute) =
     attrib.AttributeType.CompiledName = typeof<'T>.Name
 
   let hasAttrib<'T> (attribs: IList<FSharpAttribute>) = 
@@ -315,9 +338,12 @@ module ValueReader =
     | Some loc -> Some loc
     | None -> symbol.DeclarationLocation
   
-  let readMemberOrVal (ctx:ReadingContext) (v:FSharpMemberOrFunctionOrValue) = 
+  let readMemberOrVal (ctx:ReadingContext) (v:FSharpMemberOrFunctionOrValue) =
+    // we calculate this early just in case this fails with an FCS error.
+    let requireQualifiedAccess =
+        hasAttrib<RequireQualifiedAccessAttribute> v.LogicalEnclosingEntity.Attributes
+    
     let buildUsage (args:string option) = 
-      let tyname = v.LogicalEnclosingEntity.DisplayName
       let parArgs = args |> Option.map (fun s -> 
         if String.IsNullOrWhiteSpace(s) then "" 
         elif s.StartsWith("(") then s
@@ -329,8 +355,7 @@ module ValueReader =
       // Ordinary instance members
       | _, true, _, name -> name + (defaultArg parArgs "(...)")
       // Ordinary functions or values
-      | false, _, _, name when 
-          not (hasAttrib<RequireQualifiedAccessAttribute> v.LogicalEnclosingEntity.Attributes) -> 
+      | false, _, _, name when not <| requireQualifiedAccess -> 
             name + " " + (defaultArg args "(...)")
       // Ordinary static members or things (?) that require fully qualified access
       | _, _, _, name -> name + (defaultArg parArgs "(...)")
@@ -464,6 +489,7 @@ module ValueReader =
 
 module Reader =
   open FSharp.Markdown
+  open FSharp.Literate
   open System.IO
   open ValueReader
 
@@ -479,7 +505,7 @@ module Reader =
           yield line.Value ]
     String.removeSpaces lines
 
-  let readMarkdownComment (doc:MarkdownDocument) = 
+  let readMarkdownComment (doc:LiterateDocument) = 
     let groups = System.Collections.Generic.Dictionary<_, _>()
     let mutable current = "<default>"
     groups.Add(current, [])
@@ -490,13 +516,13 @@ module Reader =
           groups.Add(current, [par])
       | par -> 
           groups.[current] <- par::groups.[current]
-    let blurb = Markdown.WriteHtml(MarkdownDocument(List.rev groups.["<default>"], doc.DefinedLinks))
-    let full = Markdown.WriteHtml(doc)
+    let blurb = Literate.WriteHtml(doc.With(List.rev groups.["<default>"]))
+    let full = Literate.WriteHtml(doc)
 
     let sections = 
       [ for (KeyValue(k, v)) in groups ->
           let body = if k = "<default>" then List.rev v else List.tail (List.rev v)
-          let html = Markdown.WriteHtml(MarkdownDocument(body, doc.DefinedLinks))
+          let html = Literate.WriteHtml(doc.With(body))
           KeyValuePair(k, html) ]
     Comment.Create(blurb, full, sections)
 
@@ -540,11 +566,78 @@ module Reader =
    let str = full.ToString()
    Comment.Create(str, str, [KeyValuePair("<default>", str)])
 
+  /// Returns all indirect links in a specified span node
+  let rec collectSpanIndirectLinks span = seq {
+    match span with
+    | IndirectLink (_, _, key) -> yield key
+    | Matching.SpanLeaf _ -> ()
+    | Matching.SpanNode(_, spans) ->
+      for s in spans do yield! collectSpanIndirectLinks s }
+
+  /// Returns all indirect links in the specified paragraph node
+  let rec collectParagraphIndirectLinks par = seq {
+    match par with
+    | Matching.ParagraphLeaf _ -> ()
+    | Matching.ParagraphNested(_, pars) ->
+      for ps in pars do
+        for p in ps do yield! collectParagraphIndirectLinks p
+    | Matching.ParagraphSpans(_, spans) ->
+      for s in spans do yield! collectSpanIndirectLinks s }
+
+  /// Returns whether the link is not included in the document defined links
+  let linkNotDefined (doc: LiterateDocument) (link:string) =
+    [ link; link.Replace("\r\n", ""); link.Replace("\r\n", " ");
+      link.Replace("\n", ""); link.Replace("\n", " ") ]
+    |> Seq.map (fun key -> not(doc.DefinedLinks.ContainsKey(key)) )
+    |> Seq.reduce (fun a c -> a && c)
+
+  /// Returns a tuple of the undefined link and its Cref if it exists
+  let getTypeLink (ctx:ReadingContext) undefinedLink =
+    // Append 'T:' to try to get the link from urlmap
+    match ctx.UrlMap.ResolveCref ("T:" + undefinedLink) with
+    | Some cRef -> if cRef.IsInternal then Some (undefinedLink, cRef) else None
+    | None -> None
+
+  /// Adds a cross-type link to the document defined links
+  let addLinkToType (doc: LiterateDocument) link =
+    match link with
+    | Some(k, v) -> do doc.DefinedLinks.Add(k, (v.ReferenceLink, Some v.NiceName))
+    | None -> ()
+
+  /// Wraps the span inside an `IndirectLink` if it is an inline code that can be converted to a link
+  let wrapInlineCodeLinksInSpans (ctx:ReadingContext) span =
+    match span with
+    | InlineCode(code) ->  
+        match getTypeLink ctx code with
+        | Some _ -> IndirectLink([span], code, code)
+        | None -> span
+    | _ -> span
+
+  /// Wraps inside an `IndirectLink` all inline code spans in the paragraph that can be converted to a link
+  let rec wrapInlineCodeLinksInParagraphs (ctx:ReadingContext) (para:MarkdownParagraph) =
+    match para with
+    | Matching.ParagraphLeaf _ -> para
+    | Matching.ParagraphNested(info, pars) ->
+        Matching.ParagraphNested(info, pars |> List.map (fun innerPars -> List.map (wrapInlineCodeLinksInParagraphs ctx) innerPars))
+    | Matching.ParagraphSpans(info, spans) -> Matching.ParagraphSpans(info, List.map (wrapInlineCodeLinksInSpans ctx) spans)
+
+  /// Adds the missing links to types to the document defined links
+  let addMissingLinkToTypes ctx (doc: LiterateDocument) =
+    let replacedParagraphs = doc.Paragraphs |> List.map (wrapInlineCodeLinksInParagraphs ctx)
+
+    do replacedParagraphs
+    |> Seq.collect collectParagraphIndirectLinks
+    |> Seq.filter (linkNotDefined doc)
+    |> Seq.map (getTypeLink ctx)
+    |> Seq.iter (addLinkToType doc)
+    
+    LiterateDocument(replacedParagraphs, doc.FormattedTips, doc.DefinedLinks, doc.Source, doc.SourceFile, doc.Errors)
+
   let readCommentAndCommands (ctx:ReadingContext) xmlSig = 
     match ctx.XmlMemberLookup(xmlSig) with 
     | None -> 
         if not (System.String.IsNullOrEmpty xmlSig) then
-            Log.logf "Warning: Could not find documentation for '%s'! (You can ignore this message when you have not written documentation for this member)" xmlSig
+            Log.verbf "Could not find documentation for '%s'! (You can ignore this message when you have not written documentation for this member)" xmlSig
         dict[], Comment.Empty
     | Some el ->
         let sum = el.Element(XName.Get "summary")
@@ -553,21 +646,30 @@ module Reader =
             dict[], Comment.Empty
           else
             dict[], (Comment.Create ("", el.Value, []))
-        else 
-          if ctx.MarkdownComments then 
-            let lines = removeSpaces sum.Value
-            let cmds = new System.Collections.Generic.Dictionary<_, _>()
-            let text =
-              lines |> Seq.filter (function
+        else
+          let lines = removeSpaces sum.Value
+          let cmds = new System.Collections.Generic.Dictionary<_, _>()
+          let findCommand = (function
                 | String.StartsWithWrapped ("[", "]") (ParseCommand(k, v), rest) -> 
+                    Some (k, v)
+                | _ -> None)
+          if ctx.MarkdownComments then
+            let text =
+              lines |> Seq.filter (findCommand >> (function
+                | Some (k, v) -> 
                     cmds.Add(k, v)
                     false
-                | _ -> true) |> String.concat "\n"
-            let doc = Markdown.Parse(text)
+                | _ -> true)) |> String.concat "\n"
+            let doc = 
+              Literate.ParseMarkdownString
+                ( text, path=Path.Combine(ctx.AssemblyPath, "docs.fsx"), 
+                  formatAgent=ctx.FormatAgent, compilerOptions=ctx.CompilerOptions )
+                |> (addMissingLinkToTypes ctx)
             cmds :> IDictionary<_, _>, readMarkdownComment doc
-          else 
-            let cmds = new System.Collections.Generic.Dictionary<_, _>()
-            
+          else
+            lines 
+              |> Seq.choose findCommand
+              |> Seq.iter (fun (k, v) -> cmds.Add(k,v))  
             cmds :> IDictionary<_, _>, readXmlComment ctx.UrlMap sum
 
   let readComment ctx xmlSig = readCommentAndCommands ctx xmlSig |> snd
@@ -632,7 +734,8 @@ module Reader =
             else ""
         sprintf "%s%s%s" name typeargs paramList
       with exn ->
-        Log.logf  "Error while building member-name for %s because: %s" memb.FullName exn.Message
+        Log.errorf "Error while building member-name for %s because: %s" memb.FullName exn.Message
+        Log.verbf "Full Exception details of previous message: %O" exn
         memb.CompiledName
     match (memb.XmlDocSig, memb.EnclosingEntity.TryFullName) with
     | "",  None    -> ""
@@ -658,6 +761,7 @@ module Reader =
     let usedNames = Dictionary<_, _>()
     let registeredEntities = Dictionary<_, _>()
     let entityLookup = Dictionary<_, _>()
+    let niceNameEntityLookup = Dictionary<_, _>()
     let nameGen (name:string) =
       let nice = (toReplace
                   |> Seq.fold (fun (s:string) (inv, repl) -> s.Replace(inv, repl)) name)
@@ -675,6 +779,9 @@ module Reader =
         if (not (System.String.IsNullOrEmpty xmlsig)) then
             assert (xmlsig.StartsWith("T:"))
             entityLookup.[xmlsig.Substring(2)] <- entity
+            if (not(niceNameEntityLookup.ContainsKey(entity.LogicalName))) then
+                niceNameEntityLookup.[entity.LogicalName] <- List<_>()
+            niceNameEntityLookup.[entity.LogicalName].Add(entity)
         for nested in entity.NestedEntities do registerEntity nested
 
     let getUrl (entity:FSharpEntity) =
@@ -703,7 +810,16 @@ module Reader =
         match entityLookup.TryGetValue(typeName) with
         | true, entity -> 
             Some { IsInternal = true; ReferenceLink = sprintf "%s.html" (getUrl entity); NiceName = entity.LogicalName }
-        | _ -> None
+        | _ -> 
+            match niceNameEntityLookup.TryGetValue(typeName) with
+            | true, entityList ->
+                if entityList.Count = 1 then
+                    Some{ IsInternal = true; ReferenceLink = sprintf "%s.html" (getUrl entityList.[0]); NiceName = entityList.[0].LogicalName }
+                else
+                    if entityList.Count > 1 then
+                        do Log.warnf "Duplicate types found for the simple name: %s" typeName
+                    None
+            | _ -> None
 
     let resolveCref (cref:string) = 
         if (cref.Length <= 2) then invalidArg "cref" (sprintf "the given cref: '%s' is invalid!" cref)
@@ -721,7 +837,7 @@ module Reader =
                        NiceName = simple }
         // Compiler was unable to resolve!
         | _ when cref.StartsWith("!:")  ->
-            Log.logf "WARNING: Compiler was unable to resolve %s" cref
+            Log.warnf "Compiler was unable to resolve %s" cref
             None
         // Member
         | _ when cref.[1] = ':' ->
@@ -735,11 +851,11 @@ module Reader =
                            ReferenceLink = sprintf "http://msdn.microsoft.com/en-us/library/%s" noParen;
                            NiceName = simple }
             | None ->
-                Log.logf "WARNING: Assumed '%s' was a member but we cannot extract a type!" cref
+                Log.warnf "Assumed '%s' was a member but we cannot extract a type!" cref
                 None
         // No idea
         | _ ->
-            Log.logf "WARNING: Unresolved reference '%s'!" cref
+            Log.warnf "Unresolved reference '%s'!" cref
             None
     { new IUrlHolder with
         member x.RegisterEntity entity = 
@@ -755,12 +871,30 @@ module Reader =
   /// Reads XML documentation comments and calls the specified function
   /// to parse the rest of the entity, unless [omit] command is set.
   /// The function is called with category name, commands & comment.
-  let readCommentsInto ctx xmlDoc f =
+  let readCommentsInto (sym:FSharpSymbol) ctx xmlDoc f =
     let cmds, comment = readCommentAndCommands ctx xmlDoc
     match cmds with
     | Command "omit" _ -> None
     | Command "category" cat 
-    | Let "" (cat, _) -> Some(f cat cmds comment)
+    | Let "" (cat, _) ->
+      try
+        Some(f cat cmds comment)
+      with e ->
+        let name =
+          try sym.FullName
+          with _ ->
+            try sym.DisplayName
+            with _ ->
+              let part =
+                try
+                  let ass = sym.Assembly
+                  match ass.FileName with
+                  | Some f -> f
+                  | None -> ass.QualifiedName
+                with _ -> "unknown"
+              sprintf "unknown, part of %s" part
+        Log.errorf "Could not read comments from entity '%s': %O" name e
+        None
 
   let checkAccess ctx (access: FSharpAccessibility) = 
      not ctx.PublicOnly || access.IsPublic
@@ -774,7 +908,7 @@ module Reader =
     |> List.ofSeq
 
   let tryReadMember (ctx:ReadingContext) kind (memb:FSharpMemberOrFunctionOrValue) =
-    readCommentsInto ctx (getXmlDocSigForMember memb) (fun cat _ comment ->
+    readCommentsInto memb ctx (getXmlDocSigForMember memb) (fun cat _ comment ->
       Member.Create(memb.DisplayName, kind, cat, readMemberOrVal ctx memb, comment))
 
   let readAllMembers ctx kind (members:seq<FSharpMemberOrFunctionOrValue>) = 
@@ -802,7 +936,7 @@ module Reader =
     |> List.ofSeq
     |> List.filter (fun v -> checkAccess ctx v.Accessibility)
     |> List.choose (fun case ->
-      readCommentsInto ctx case.XmlDocSig (fun cat _ comment ->
+      readCommentsInto case ctx case.XmlDocSig (fun cat _ comment ->
         Member.Create(case.Name, MemberKind.UnionCase, cat, readUnionCase ctx case, comment)))
 
   let readRecordFields ctx (typ:FSharpEntity) =
@@ -810,14 +944,14 @@ module Reader =
     |> List.ofSeq
     |> List.filter (fun field -> not field.IsCompilerGenerated)
     |> List.choose (fun field ->
-      readCommentsInto ctx field.XmlDocSig (fun cat _ comment ->
+      readCommentsInto field ctx field.XmlDocSig (fun cat _ comment ->
         Member.Create(field.Name, MemberKind.RecordField, cat, readFSharpField ctx field, comment)))
 
   let readStaticParams ctx (typ:FSharpEntity) =
     typ.StaticParameters
     |> List.ofSeq
     |> List.choose (fun staticParam ->
-      readCommentsInto ctx (getFSharpStaticParamXmlSig typ staticParam.Name) (fun cat _ comment ->
+      readCommentsInto staticParam ctx (getFSharpStaticParamXmlSig typ staticParam.Name) (fun cat _ comment ->
         Member.Create(staticParam.Name, MemberKind.StaticParameter, cat, readFSharpStaticParam ctx staticParam, comment)))
 
   // ----------------------------------------------------------------------------------------------
@@ -855,7 +989,7 @@ module Reader =
     if typ.IsProvided && typ.XmlDoc.Count > 0 then
         registerTypeProviderXmlDocs ctx typ
     let xmlDocSig = getXmlDocSigForType typ
-    readCommentsInto ctx xmlDocSig (fun cat cmds comment ->
+    readCommentsInto typ ctx xmlDocSig (fun cat cmds comment ->
       let urlName = ctx.UrlMap.GetUrl typ
 
       let rec getMembers (typ:FSharpEntity) = [
@@ -906,7 +1040,7 @@ module Reader =
         ( name, cat, urlName, comment, ctx.Assembly, cases, fields, statParams, ctors, inst, stat ))
 
   and readModule (ctx:ReadingContext) (modul:FSharpEntity) =
-    readCommentsInto ctx modul.XmlDocSig (fun cat cmd comment ->
+    readCommentsInto modul ctx modul.XmlDocSig (fun cat cmd comment ->
     
       // Properties & value bindings in the module
       let urlName = ctx.UrlMap.GetUrl modul
@@ -930,7 +1064,7 @@ module Reader =
     let modules, types = readModulesAndTypes ctx entities 
     Namespace.Create(ns, modules, types)
 
-  let readAssembly (assembly:FSharpAssembly, publicOnly, xmlFile:string, sourceFolderRepo, urlRangeHighlight, markDownComments, urlMap) =
+  let readAssembly (assembly:FSharpAssembly, publicOnly, xmlFile:string, sourceFolderRepo, urlRangeHighlight, markDownComments, urlMap, codeFormatCompilerArgs) =
     let assemblyName = AssemblyName(assembly.QualifiedName)
     
     // Read in the supplied XML file, map its name attributes to document text 
@@ -950,10 +1084,16 @@ module Reader =
         // See https://github.com/tpetricek/FSharp.Formatting/issues/229
         // and https://github.com/tpetricek/FSharp.Formatting/issues/287
         if xmlMemberMap.ContainsKey key then 
-          Log.logf "Warning: Duplicate documentation for '%s', one will be ignored!" key
+          Log.warnf "Duplicate documentation for '%s', one will be ignored!" key
         xmlMemberMap.[key] <- value
-
-    let ctx = ReadingContext.Create(publicOnly, assemblyName, xmlMemberMap, sourceFolderRepo, urlRangeHighlight, markDownComments, urlMap)
+    
+    // Code formatting agent & options used when processing inline code snippets in comments
+    let asmPath = Path.GetDirectoryName(defaultArg assembly.FileName xmlFile)
+    let formatAgent = CodeFormat.CreateAgent()
+    let ctx = 
+      ReadingContext.Create
+        ( publicOnly, assemblyName, xmlMemberMap, sourceFolderRepo, urlRangeHighlight,
+          markDownComments, urlMap, asmPath, codeFormatCompilerArgs, formatAgent)
 
     // 
     let namespaces = 
@@ -1020,8 +1160,15 @@ type MetadataFormat =
         ?moduleTemplate = moduleTemplate, ?typeTemplate = typeTemplate, ?xmlFile = xmlFile, ?sourceRepo = sourceRepo, ?sourceFolder = sourceFolder,
         ?publicOnly = publicOnly, ?libDirs = libDirs, ?otherFlags = otherFlags, ?markDownComments = markDownComments, ?urlRangeHighlight = urlRangeHighlight, ?assemblyReferences = assemblyReferences)
 
+  /// generates documentation for multiple files specified by the `dllFiles` parameter
+  static member Generate(dllFiles : _ list, outDir, layoutRoots, ?parameters, ?namespaceTemplate, ?moduleTemplate, ?typeTemplate, ?xmlFile, ?sourceRepo, ?sourceFolder, ?publicOnly, ?libDirs, ?otherFlags, ?markDownComments, ?urlRangeHighlight, ?assemblyReferences) =
+    MetadataFormat.Generate
+      ( dllFiles :> _ seq, outDir, layoutRoots, ?parameters = parameters, ?namespaceTemplate = namespaceTemplate, 
+        ?moduleTemplate = moduleTemplate, ?typeTemplate = typeTemplate, ?xmlFile = xmlFile, ?sourceRepo = sourceRepo, ?sourceFolder = sourceFolder,
+        ?publicOnly = publicOnly, ?libDirs = libDirs, ?otherFlags = otherFlags, ?markDownComments = markDownComments, ?urlRangeHighlight = urlRangeHighlight, ?assemblyReferences = assemblyReferences)
+
   /// This overload generates documentation for multiple files specified by the `dllFiles` parameter
-  static member Generate(dllFiles, outDir, layoutRoots, ?parameters, ?namespaceTemplate, ?moduleTemplate, ?typeTemplate, ?xmlFile, ?sourceRepo, ?sourceFolder, ?publicOnly, ?libDirs, ?otherFlags, ?markDownComments, ?urlRangeHighlight, ?assemblyReferences) =
+  static member Generate(dllFiles : _ seq, outDir, layoutRoots, ?parameters, ?namespaceTemplate, ?moduleTemplate, ?typeTemplate, ?xmlFile, ?sourceRepo, ?sourceFolder, ?publicOnly, ?libDirs, ?otherFlags, ?markDownComments, ?urlRangeHighlight, ?assemblyReferences) =
     let (@@) a b = Path.Combine(a, b)
     let parameters = defaultArg parameters []
     let props = [ "Properties", dict parameters ]
@@ -1033,23 +1180,23 @@ type MetadataFormat =
     let otherFlags = defaultArg otherFlags []
     let publicOnly = defaultArg publicOnly true
     let libDirs = defaultArg libDirs []
-    let dllFiles = dllFiles |> List.map Path.GetFullPath
+    let dllFiles = dllFiles |> List.ofSeq |> List.map Path.GetFullPath
     let urlRangeHighlight =
       defaultArg urlRangeHighlight (fun url start stop -> String.Format("{0}#L{1}-{2}", url, start, stop))
     let sourceFolderRepo =
         match sourceFolder, sourceRepo with
         | Some folder, Some repo -> Some(folder, repo)
         | Some folder, _ ->
-            Log.logf "Repository url should be specified along with source folder."
+            Log.warnf "Repository url should be specified along with source folder."
             None
         | _, Some repo ->
-            Log.logf "Source folder should be specified along with repository url."
+            Log.warnf "Source folder should be specified along with repository url."
             None
         | _ -> None
 
     // When resolving assemblies, look in folders where all DLLs live
     AppDomain.CurrentDomain.add_AssemblyResolve(System.ResolveEventHandler(fun o e ->
-      Log.logf "Resolving assembly: %s" e.Name
+      Log.verbf "Resolving assembly: %s" e.Name
       let asmName = System.Reflection.AssemblyName(e.Name)
       let asmOpt = 
         dllFiles |> Seq.tryPick (fun dll ->
@@ -1062,66 +1209,31 @@ type MetadataFormat =
       defaultArg asmOpt null
     ))
 
+    // Compiler arguments used when formatting code snippets inside Markdown comments
+    let codeFormatCompilerArgs = 
+      [ for dir in libDirs do yield sprintf "-I:\"%s\"" dir
+        for file in dllFiles do yield sprintf "-r:\"%s\"" file ]
+      |> String.concat " "
+
     // Read and process assemblies and the corresponding XML files
     let assemblies = 
-      let checker = Microsoft.FSharp.Compiler.SourceCodeServices.FSharpChecker.Create()
-      let base1 = Path.GetTempFileName()
-      let dllName = Path.ChangeExtension(base1, ".dll")
-      let fileName1 = Path.ChangeExtension(base1, ".fs")
-      let projFileName = Path.ChangeExtension(base1, ".fsproj")
-      File.WriteAllText(fileName1, """module M""")
-      let findReferences libDir =
-        Directory.EnumerateFiles(libDir, "*.dll")
-        |> Seq.map Path.GetFullPath
-        |> Seq.filter (fun file -> dllFiles |> List.exists (fun binary -> binary = file) |> not)
-
-      let blacklist =
-        [ "FSharp.Core.dll"; "mscorlib.dll" ]
-
-      let dllReferences =
-        libDirs
-        |> Seq.collect findReferences
-        |> Seq.append dllFiles
-        |> Seq.filter (fun file -> blacklist |> List.exists (fun black -> black = Path.GetFileName file) |> not)
-
-      let options = 
-        checker.GetProjectOptionsFromCommandLineArgs(projFileName,
-          [|yield "--debug:full" 
-            yield "--define:DEBUG" 
-            yield "--optimize-" 
-            yield "--out:" + dllName
-            yield "--doc:test.xml" 
-            yield "--warn:3" 
-            yield "--fullpaths" 
-            yield "--flaterrors" 
-            yield "--target:library" 
-            for dllFile in dllReferences do
-              yield "-r:"+dllFile
-            // Libdirs are handled above, see https://github.com/fsharp/FSharp.Compiler.Service/issues/313
-            yield! otherFlags
-            yield fileName1 |])
-      let results = checker.ParseAndCheckProject(options) |> Async.RunSynchronously
-      for err in results.Errors  do
-         Log.logf "**** %s: %s" (if err.Severity = Microsoft.FSharp.Compiler.FSharpErrorSeverity.Error then "error" else "warning") err.Message
-
-      if results.HasCriticalErrors then 
-         Log.logf "**** stopping due to critical errors"
-         failwith "**** stopped due to critical errors"
-
-      let table = 
-          results.ProjectContext.GetReferencedAssemblies()
-            |> List.map (fun x -> x.SimpleName, x)
-            |> dict
+      let resolvedList = 
+        FSharpAssembly.LoadFiles(dllFiles, libDirs, otherFlags = otherFlags)
+        |> Seq.toList
 
       // generate the names for the html files beforehand so we can resolve <see cref=""/> links.
       let urlMap = Reader.createUrlHolder()
 
-      for dllFile in dllFiles do
-        let asmName = Path.GetFileNameWithoutExtension(Path.GetFileName(dllFile))
-        if table.ContainsKey asmName then
-          table.[asmName].Contents.Entities |> Seq.iter (urlMap.RegisterEntity)
+      resolvedList |> Seq.iter (function
+        | _, Some asm ->
+          asm.Contents.Entities |> Seq.iter (urlMap.RegisterEntity)
+        | _ -> ())
 
-      [ for dllFile in dllFiles do
+      resolvedList |> List.choose (function
+        | dllFile, None ->
+          Log.warnf "**** Skipping assembly '%s' because was not found in resolved assembly list" dllFile
+          None
+        | dllFile, Some asm ->
           let xmlFile = defaultArg xmlFile (Path.ChangeExtension(dllFile, ".xml"))
           let xmlFileNoExt = Path.GetFileNameWithoutExtension(xmlFile)
           let xmlFileOpt =
@@ -1134,15 +1246,10 @@ type MetadataFormat =
           match xmlFileOpt with
           | None -> raise <| FileNotFoundException(sprintf "Associated XML file '%s' was not found." xmlFile)
           | Some xmlFile ->
-
-          Log.logf "Reading assembly: %s" dllFile
-          let asmName = Path.GetFileNameWithoutExtension(Path.GetFileName(dllFile))
-          if not (table.ContainsKey asmName) then 
-              Log.logf "**** Skipping assembly '%s' because was not found in resolved assembly list" asmName
-          else
-              let asm = table.[asmName]
-              Log.logf "Parsing assembly (with documentation file '%s')" xmlFile
-              yield Reader.readAssembly (asm, publicOnly, xmlFile, sourceFolderRepo, urlRangeHighlight, defaultArg markDownComments true, urlMap) ]
+            Reader.readAssembly 
+              ( asm, publicOnly, xmlFile, sourceFolderRepo, urlRangeHighlight, 
+                defaultArg markDownComments true, urlMap, codeFormatCompilerArgs ) 
+            |> Some)
     // Get the name - either from parameters, or name of the assembly (if there is just one)
     let name = 
       let projName = parameters |> List.tryFind (fun (k, v) -> k = "project-name") |> Option.map snd
@@ -1162,43 +1269,46 @@ type MetadataFormat =
     let asm = AssemblyGroup.Create(name, List.map fst assemblies, namespaces |> List.sortBy (fun ns -> ns.Name))
         
     // Generate all the HTML stuff
-    Log.logf "Starting razor engine"
+    Log.infof "Starting razor engine"
     let razor = RazorRender<AssemblyGroup>(layoutRoots, ["FSharp.MetadataFormat"], namespaceTemplate, ?references = assemblyReferences)
 
-    Log.logf "Generating: index.html"
+    Log.infof "Generating: index.html"
     let out = razor.ProcessFile(asm, props)
     File.WriteAllText(outDir @@ "index.html", out)
 
     // Generate documentation for all modules
-    Log.logf "Generating modules..."
-    let rec nestedModules (modul:Module) = seq {
-      yield modul
-      for n in modul.NestedModules do yield! nestedModules n }
-    let modules = 
+    Log.infof "Generating modules..."
+    let rec nestedModules ns parent (modul:Module) = seq {
+      yield ModuleInfo.Create(modul, asm, ns, parent)
+      for n in modul.NestedModules do yield! nestedModules ns (Some modul) n }
+    let moduleInfos = 
       [ for ns in asm.Namespaces do 
-          for n in ns.Modules do yield! nestedModules n ]
+          for n in ns.Modules do yield! nestedModules ns None n ]
     
     let razor = RazorRender<ModuleInfo>(layoutRoots, ["FSharp.MetadataFormat"], moduleTemplate, ?references = assemblyReferences)
 
-    for modul in modules do
-      Log.logf "Generating module: %s" modul.UrlName
-      let out = razor.ProcessFile(ModuleInfo.Create(modul, asm), props)
-      File.WriteAllText(outDir @@ (modul.UrlName + ".html"), out)
-      Log.logf "Finished module: %s" modul.UrlName
+    for modulInfo in moduleInfos do
+      Log.infof "Generating module: %s" modulInfo.Module.UrlName
+      let out = razor.ProcessFile(modulInfo, props)
+      File.WriteAllText(outDir @@ (modulInfo.Module.UrlName + ".html"), out)
+      Log.infof "Finished module: %s" modulInfo.Module.UrlName
 
-    Log.logf "Generating types..."
-    let rec nestedTypes (modul:Module) = seq {
-      yield! modul.NestedTypes
-      for n in modul.NestedModules do yield! nestedTypes n }
-    let types = 
+    Log.infof "Generating types..."
+    let createType ns modul typ =
+        TypeInfo.Create(typ, asm, ns, modul)
+
+    let rec nestedTypes ns (modul:Module) = seq {
+      yield! (modul.NestedTypes |> List.map (createType ns (Some modul) ))
+      for n in modul.NestedModules do yield! nestedTypes ns n }
+    let typesInfos = 
       [ for ns in asm.Namespaces do 
-          for n in ns.Modules do yield! nestedTypes n
-          yield! ns.Types ]
+          for n in ns.Modules do yield! nestedTypes ns n
+          yield! (ns.Types |> List.map (createType ns None ))  ]
 
     // Generate documentation for all types
     let razor = new RazorRender<TypeInfo>(layoutRoots, ["FSharp.MetadataFormat"], typeTemplate, ?references = assemblyReferences)
-    for typ in types do
-      Log.logf "Generating type: %s" typ.UrlName
-      let out = razor.ProcessFile(TypeInfo.Create(typ, asm), props)
-      File.WriteAllText(outDir @@ (typ.UrlName + ".html"), out)
-      Log.logf "Finished type: %s" typ.UrlName
+    for typInfo in typesInfos do
+      Log.infof "Generating type: %s" typInfo.Type.UrlName
+      let out = razor.ProcessFile(typInfo, props)
+      File.WriteAllText(outDir @@ (typInfo.Type.UrlName + ".html"), out)
+      Log.infof "Finished type: %s" typInfo.Type.UrlName

@@ -4,7 +4,11 @@
 // --------------------------------------------------------------------------------------
 
 // Web site location for the generated documentation
+#if TESTING
+let website = __SOURCE_DIRECTORY__ + "../output"
+#else
 let website = "/FSharp.Formatting"
+#endif
 
 let githubLink = "http://github.com/tpetricek/FSharp.Formatting"
 
@@ -17,7 +21,7 @@ let info =
     "project-nuget", "http://nuget.org/packages/FSharp.Formatting" ]
 
 let referenceBinaries = 
-  [ "FSharp.CodeFormat.dll"; "FSharp.Literate.dll"; "FSharp.Markdown.dll"; "FSharp.MetadataFormat.dll" ]
+  [ "FSharp.CodeFormat.dll"; "FSharp.Literate.dll"; "FSharp.Markdown.dll"; "FSharp.MetadataFormat.dll"; "FSharp.Formatting.Common.dll" ]
 
 // --------------------------------------------------------------------------------------
 // For typical project, no changes are needed below
@@ -29,13 +33,23 @@ let referenceBinaries =
 #r "FakeLib.dll"
 open Fake
 open System.IO
+open Fake
 open Fake.FileHelper
 
-// The following lines are F# Formatting only bootstrapping...
+// This is needed to bootstrap ourself (make sure we have the same environment while building as our users) ...
+// If you came here from the nuspec file add your file.
+// If you add files here to make the CI happy add those files to the .nuspec file as well
+// TODO: INSTEAD build the nuspec file before generating the documentation and extract it...
 ensureDirectory (__SOURCE_DIRECTORY__ @@ "../../packages/FSharp.Formatting/lib/net40")
-File.Copy
-  ( __SOURCE_DIRECTORY__ @@ "../../packages/Microsoft.AspNet.Razor/lib/net45/System.Web.Razor.dll", 
-    __SOURCE_DIRECTORY__ @@ "../../packages/FSharp.Formatting/lib/net40/System.Web.Razor.dll", true)
+let buildFiles = [ "CSharpFormat.dll"; "FSharp.CodeFormat.dll"; "FSharp.Literate.dll"
+                   "FSharp.Markdown.dll"; "FSharp.MetadataFormat.dll"; "RazorEngine.dll";
+                   "System.Web.Razor.dll"; "FSharp.Formatting.Common.dll" ]
+let bundledFiles =
+  buildFiles
+  |> List.map (fun f -> 
+      __SOURCE_DIRECTORY__ @@ sprintf "../../bin/%s" f, 
+      __SOURCE_DIRECTORY__ @@ sprintf "../../packages/FSharp.Formatting/lib/net40/%s" f)
+for source, dest in bundledFiles do File.Copy(source, dest, true)
 #load "../../packages/FSharp.Formatting/FSharp.Formatting.fsx"
 
 open FSharp.Literate
@@ -49,13 +63,15 @@ let root = website
 let root = "file://" + (__SOURCE_DIRECTORY__ @@ "../output")
 #endif
 
+System.IO.Directory.SetCurrentDirectory (__SOURCE_DIRECTORY__)
+
 // Paths with template/source/output locations
-let bin        = __SOURCE_DIRECTORY__ @@ "../../bin"
-let content    = __SOURCE_DIRECTORY__ @@ "../content"
-let output     = __SOURCE_DIRECTORY__ @@ "../output"
-let files      = __SOURCE_DIRECTORY__ @@ "../files"
-let templates  = __SOURCE_DIRECTORY__
-let formatting = __SOURCE_DIRECTORY__ @@ "../../misc/"
+let bin        = "../../bin"
+let content    = "../content"
+let output     = "../output"
+let files      = "../files"
+let templates  = "." 
+let formatting = "../../misc/"
 let docTemplate = formatting @@ "templates/docpage.cshtml"
 let docTemplateSbS = templates @@ "docpage-sidebyside.cshtml"
 
@@ -71,6 +87,8 @@ subDirectories (directoryInfo templates)
                             name, [templates @@ name
                                    formatting @@ "templates"
                                    formatting @@ "templates/reference" ]))
+
+let fsiEvaluator = lazy (Some (FsiEvaluator() :> IFsiEvaluator))
 
 // Copy static files and CSS + JS from F# Formatting
 let copyFiles () =
@@ -94,13 +112,13 @@ let buildReference () =
       parameters = ("root", root)::info,
       sourceRepo = githubLink @@ "tree/master",
       sourceFolder = __SOURCE_DIRECTORY__ @@ ".." @@ "..",
-      publicOnly = true,libDirs = libDirs )
+      publicOnly = true, libDirs = libDirs)
 
 // Build documentation from `fsx` and `md` files in `docs/content`
 let buildDocumentation () =
   let subdirs = 
-    [ content, docTemplate;  
-      content @@ "sidebyside", docTemplateSbS ]
+    [ content @@ "sidebyside", docTemplateSbS
+      content, docTemplate; ]
   for dir, template in subdirs do
     let sub = "." // Everything goes into the same output directory here
     let langSpecificPath(lang, path:string) =
@@ -114,14 +132,72 @@ let buildDocumentation () =
     Literate.ProcessDirectory
       ( dir, template, output @@ sub, replacements = ("root", root)::info,
         layoutRoots = layoutRoots,
-        generateAnchors = true, 
-        includeSource = true ) // Only needed for 'side-by-side' pages, but does not hurt others
+        generateAnchors = true,
+        processRecursive = false,
+        includeSource = true, // Only needed for 'side-by-side' pages, but does not hurt others
+        ?fsiEvaluator = fsiEvaluator.Value ) // Currently we don't need it but it's a good stress test to have it here.
+
+let watch () =
+  printfn "Starting watching by initial building..."
+  let rebuildDocs () =
+    CleanDir output // Just in case the template changed (buildDocumentation is caching internally, maybe we should remove that)
+    copyFiles()
+    buildReference()
+    buildDocumentation()
+  rebuildDocs()
+  printfn "Watching for changes..."
+
+  let full s = Path.GetFullPath s
+  let queue = new System.Collections.Concurrent.ConcurrentQueue<_>()
+  let processTask () =
+    async {
+      let! tok = Async.CancellationToken
+      while not tok.IsCancellationRequested do
+        try
+          if queue.IsEmpty then
+            do! Async.Sleep 1000
+          else
+            let data = ref []
+            let hasData = ref true
+            while !hasData do
+              match queue.TryDequeue() with
+              | true, d ->
+                data := d :: !data
+              | _ ->
+                hasData := false
+
+            printfn "Detected changes (%A). Invalidate cache and rebuild." !data
+            FSharp.MetadataFormat.RazorEngineCache.InvalidateCache (!data |> Seq.map (fun change -> change.FullPath))
+            FSharp.Literate.RazorEngineCache.InvalidateCache (!data |> Seq.map (fun change -> change.FullPath))
+            rebuildDocs()
+            printfn "Documentation generation finished."
+        with e ->
+          printfn "Documentation generation failed: %O" e
+    }
+
+  use watcher =
+    !! (full content + "/*.*")
+    ++ (full templates + "/*.*")
+    ++ (full files + "/*.*")
+    ++ (full formatting + "templates/*.*")
+    |> WatchChanges (fun changes ->
+      changes |> Seq.iter queue.Enqueue)
+  use source = new System.Threading.CancellationTokenSource()
+  Async.Start(processTask (), source.Token)
+  printfn "Press enter to exit watching..."
+  System.Console.ReadLine() |> ignore
+  watcher.Dispose()
+  source.Cancel()
 
 // Generate
-copyFiles()
 #if HELP
+copyFiles()
 buildDocumentation()
 #endif
 #if REFERENCE
+copyFiles()
 buildReference()
+#endif
+#if WATCH
+watch()
 #endif

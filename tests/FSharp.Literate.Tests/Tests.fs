@@ -3,6 +3,7 @@
 #r "FSharp.Literate.dll"
 #r "FSharp.CodeFormat.dll"
 #r "FSharp.Markdown.dll"
+#r "CSharpFormat.dll"
 #r "../../packages/NUnit/lib/nunit.framework.dll"
 #load "../Common/FsUnit.fs"
 #load "../Common/MarkdownUnit.fs"
@@ -128,8 +129,18 @@ let test = 4 + 1.0"""
   doc.Errors |> Seq.length |> should be (greaterThan 0)
 
 // --------------------------------------------------------------------------------------
-// Formatting C# code snippets
+// Formatting code snippets
 // --------------------------------------------------------------------------------------
+
+[<Test>]
+let ``C# syntax highlighter can process html`` () =
+  let html = """
+<pre lang="csharp">
+var
+</pre>"""
+  let formatted = CSharpFormat.SyntaxHighlighter.FormatHtml(html)
+  let expected = html.Replace(" lang=\"csharp\"", "").Replace("var", "<span class=\"k\">var</span>")
+  formatted |> shouldEqual expected
 
 [<Test>]
 let ``Can format the var keyword in C# code snippet`` () =
@@ -157,7 +168,7 @@ var a = 10 < 10;
 [<Test>]
 let ``Codeblock whitespace is preserved`` () =
   let doc = "```markup\r\n    test\r\n    blub\r\n```\r\n";
-  let expected = "<pre lang=\"markup\">    test\r\n    blub\r\n</pre>" |> properNewLines;
+  let expected = "lang=\"markup\">    test\r\n    blub\r\n</" |> properNewLines;
   let doc = Literate.ParseMarkdownString(doc, formatAgent=getFormatAgent())
   let html = Literate.WriteHtml(doc)
   html |> should contain expected
@@ -182,23 +193,31 @@ let ``Correctly handles apostrophes in JS code block (#213)`` () =
 
 [<Test>]
 let ``Correctly encodes special HTML characters (<, >, &) in code`` () =
-  let content = """
-    [lang=js]
+  let forLang = sprintf """
+    [lang=%s]
     var pre = "<a> & <b>";"""
-  let doc = Literate.ParseMarkdownString(content, formatAgent=getFormatAgent())
-  let html = Literate.WriteHtml(doc)
-  html |> should contain "&lt;a&gt; &amp; &lt;b&gt;"
+  ["js"; "unknown-language"] |> Seq.iter (fun lang ->
+    let content = forLang lang
+    let doc = Literate.ParseMarkdownString(content, formatAgent=getFormatAgent())
+    let html = Literate.WriteHtml(doc)
+    html |> should contain "&lt;a&gt; &amp; &lt;b&gt;"
+  )
 
 [<Test>]
 let ``Correctly encodes already encoded HTML entities and tags`` () =
-  let content = """
-    [lang=js]
+  let forLang = sprintf """
+    [lang=%s]
     "&amp;" + "<em>" + "&quot;"; """
-  let doc = Literate.ParseMarkdownString(content, formatAgent=getFormatAgent())
-  let html = Literate.WriteHtml(doc)
-  html |> should contain "&amp;amp;"
-  html |> should contain "&amp;quot;"
-  html |> should contain "&lt;em&gt;"
+  ["js"; "unknown-language"] |> Seq.iter (fun lang ->
+    let content = forLang lang
+    content |> should contain lang
+    let doc = Literate.ParseMarkdownString(content, formatAgent=getFormatAgent())
+    let html = Literate.WriteHtml(doc)
+    html |> should contain "&amp;amp;"
+    html |> should contain "&amp;quot;"
+    html |> should contain "&lt;em&gt;"
+  )
+
 
 [<Test>]
 let ``Generates line numbers for F# code snippets`` () =
@@ -228,6 +247,31 @@ var a2 = 2;
   html |> should contain "1:"
   html |> should contain "2:"
   html |> should notContain "3:"
+
+[<Test>]
+let ``HTML for line numbers generated for F# and non-F# is the same``() =
+  let content1 = "    [lang=js]\n    var"
+  let content2 = "    let"
+  let doc1 = Literate.ParseMarkdownString(content1, formatAgent=getFormatAgent())
+  let doc2 = Literate.ParseMarkdownString(content2, formatAgent=getFormatAgent())
+  let html1 = Literate.WriteHtml(doc1, lineNumbers=true)
+  let html2 = Literate.WriteHtml(doc2, lineNumbers=true)
+  
+  html1.Substring(0, html1.IndexOf("1:"))
+  |> shouldEqual <| html2.Substring(0, html2.IndexOf("1:"))
+
+[<Test>]
+let ``HTML for snippets generated for F# and non-F# has 'fssnip' class``() =
+  let content1 = "    [lang=js]\n    var"
+  let content2 = "    let"
+  let doc1 = Literate.ParseMarkdownString(content1, formatAgent=getFormatAgent())
+  let doc2 = Literate.ParseMarkdownString(content2, formatAgent=getFormatAgent())
+  let html1 = Literate.WriteHtml(doc1, lineNumbers=true)
+  let html2 = Literate.WriteHtml(doc2, lineNumbers=true)
+
+  // the 'fssnip' class appears for both <pre> with lines and <pre> with code
+  html1.Split([| "fssnip" |], System.StringSplitOptions.None).Length |> shouldEqual 3
+  html2.Split([| "fssnip" |], System.StringSplitOptions.None).Length |> shouldEqual 3
 
 // --------------------------------------------------------------------------------------
 // Test that parsed documents for Markdown and F# #scripts are the same
@@ -374,3 +418,27 @@ let test = 42
   tips |> should contain "test : int"
   html |> should notContain "test : int"
   html |> should contain "hello"
+
+
+[<Test>]
+let ``Can format single snippet with label using literate parser`` () =
+  let source = """
+// [snippet:demo]
+let add a b = a + b
+// [/snippet]"""
+  let doc = Literate.ParseScriptString(source, "/somewhere/test.fsx", getFormatAgent())
+  doc.Paragraphs |> shouldMatchPar (function Heading(_, [Literal "demo"]) -> true | _ -> false)
+
+
+[<Test>]
+let ``Can format multiple snippets with labels using literate parser`` () =
+  let source = """
+// [snippet:demo1]
+let add a b = a + b
+// [/snippet]
+// [snippet:demo2]
+let mul a b = a * b
+// [/snippet]"""
+  let doc = Literate.ParseScriptString(source, "/somewhere/test.fsx", getFormatAgent())
+  doc.Paragraphs |> shouldMatchPar (function Heading(_, [Literal "demo1"]) -> true | _ -> false)
+  doc.Paragraphs |> shouldMatchPar (function Heading(_, [Literal "demo2"]) -> true | _ -> false)

@@ -7,7 +7,7 @@
 
 open System
 open System.IO
-open Fake 
+open Fake
 open Fake.AssemblyInfoFile
 open Fake.Git
 open Fake.ReleaseNotesHelper
@@ -15,8 +15,8 @@ open Fake.ReleaseNotesHelper
 Environment.CurrentDirectory <- __SOURCE_DIRECTORY__
 
 // Information about the project to be used at NuGet and in AssemblyInfo files
-let project = "FSharp.Formatting" 
-let projectTool = "FSharp.Formatting.CommandTool" 
+let project = "FSharp.Formatting"
+let projectTool = "FSharp.Formatting.CommandTool"
 
 let authors = ["Tomas Petricek"; "Oleg Pestov"; "Anh-Dung Phan"; "Xiang Zhang"; "Matthias Dittrich"]
 let authorsTool = ["Friedrich Boeckh"; "Tomas Petricek"]
@@ -24,16 +24,16 @@ let authorsTool = ["Friedrich Boeckh"; "Tomas Petricek"]
 let summary = "A package of libraries for building great F# documentation, samples and blogs"
 let summaryTool = "A command line tool for building great F# documentation, samples and blogs"
 
-let description = """             
+let description = """
   The package is a collection of libraries that can be used for literate programming
-  with F# (great for building documentation) and for generating library documentation 
-  from inline code comments. The key componments are Markdown parser, tools for formatting 
-  F# code snippets, including tool tip type information and a tool for generating 
+  with F# (great for building documentation) and for generating library documentation
+  from inline code comments. The key componments are Markdown parser, tools for formatting
+  F# code snippets, including tool tip type information and a tool for generating
   documentation from library metadata."""
-let descriptionTool = """             
+let descriptionTool = """
   The package contains a command line version of F# Formatting libraries, which
-  can be used for literate programming with F# (great for building documentation) 
-  and for generating library documentation from inline code comments. The key componments 
+  can be used for literate programming with F# (great for building documentation)
+  and for generating library documentation from inline code comments. The key componments
   are Markdown parser, tools for formatting F# code snippets, including tool tip
   type information and a tool for generating documentation from library metadata."""
 
@@ -47,14 +47,16 @@ let release = ReleaseNotesHelper.parseReleaseNotes (File.ReadLines "RELEASE_NOTE
 // Generate assembly info files with the right version & up-to-date information
 
 Target "AssemblyInfo" (fun _ ->
-  let fileName = "src/Common/AssemblyInfo.fs"
-  CreateFSharpAssemblyInfo fileName   
+  let info = 
       [ Attribute.Title project
         Attribute.Product project
         Attribute.Description summary
         Attribute.Version release.AssemblyVersion
         Attribute.FileVersion release.AssemblyVersion
+        Attribute.InformationalVersion release.NugetVersion
         Attribute.Copyright license ]
+  CreateFSharpAssemblyInfo "src/Common/AssemblyInfo.fs" info
+  CreateCSharpAssemblyInfo "src/Common/AssemblyInfo.cs" info
 )
 
 // --------------------------------------------------------------------------------------
@@ -81,7 +83,7 @@ open System.IO
 
 Target "UpdateFsxVersions" (fun _ ->
     let packages = [ "FSharp.Compiler.Service"; "FSharpVSPowerTools.Core" ]
-    let replacements = 
+    let replacements =
       packages |> Seq.map (fun packageName ->
         sprintf "/%s.(.*)/lib" packageName,
         sprintf "/%s.%s/lib" packageName (GetPackageVersion "packages" packageName))
@@ -93,12 +95,12 @@ Target "UpdateFsxVersions" (fun _ ->
 )
 
 // --------------------------------------------------------------------------------------
-// Build library 
+// Build library
 
 Target "Build" (fun _ ->
     { BaseDirectory = __SOURCE_DIRECTORY__
       Includes = ["FSharp.Formatting.sln"]
-      Excludes = [] } 
+      Excludes = [] }
     |> MSBuildRelease "" "Rebuild"
     |> ignore
 )
@@ -134,7 +136,7 @@ Target "MergeVSPowerTools" (fun _ ->
 Target "BuildTests" (fun _ ->
     { BaseDirectory = __SOURCE_DIRECTORY__
       Includes = ["FSharp.Formatting.sln"]
-      Excludes = [] } 
+      Excludes = [] }
     |> MSBuildRelease "" "Rebuild"
     |> ignore
 
@@ -163,13 +165,13 @@ Target "BuildTests" (fun _ ->
     |> ignore
 )
 
-let testProjects = 
-  [ "FSharp.CodeFormat.Tests"; "FSharp.Literate.Tests"; 
+let testProjects =
+  [ "FSharp.CodeFormat.Tests"; "FSharp.Literate.Tests";
     "FSharp.Markdown.Tests"; "FSharp.MetadataFormat.Tests" ]
 
 Target "RunTests" <| ignore
 
-// For each test project file, generate a new "RunTest_Xyz" which 
+// For each test project file, generate a new "RunTest_Xyz" which
 // runs the test (to process them sequentially which is needed in Travis)
 for name in testProjects do
     let taskName = sprintf "RunTest_%s" name
@@ -188,8 +190,8 @@ for name in testProjects do
 // Build a NuGet package
 
 Target "NuGet" (fun _ ->
-    NuGet (fun p -> 
-        { p with   
+    NuGet (fun p ->
+        { p with
             Authors = authors
             Project = project
             Summary = summary
@@ -202,10 +204,10 @@ Target "NuGet" (fun _ ->
             Publish = hasBuildParam "nugetkey"
             Dependencies =
                 [ "FSharpVSPowerTools.Core", GetPackageVersion "packages" "FSharpVSPowerTools.Core" |> RequireExactly
-                  "FSharp.Compiler.Service", GetPackageVersion "packages" "FSharp.Compiler.Service" ] })
+                  "FSharp.Compiler.Service", GetPackageVersion "packages" "FSharp.Compiler.Service" |> RequireExactly ] })
         "nuget/FSharp.Formatting.nuspec"
-    NuGet (fun p -> 
-        { p with   
+    NuGet (fun p ->
+        { p with
             Authors = authorsTool
             Project = projectTool
             Summary = summaryTool
@@ -226,11 +228,15 @@ Target "NuGet" (fun _ ->
 Target "GenerateDocs" (fun _ ->
     if not <| executeFSIWithArgs "docs/tools" "generate.fsx" ["--define:RELEASE"; "--define:REFERENCE"; "--define:HELP"] [] then
       failwith "generating reference documentation failed")
+      
+Target "WatchDocs" (fun _ ->
+    if not <| executeFSIWithArgs "docs/tools" "generate.fsx" ["--define:WATCH"] [] then
+      failwith "generating reference documentation failed")
 
 // --------------------------------------------------------------------------------------
 // Release Scripts
 
-let gitHome = "https://github.com/tpetricek"
+let gitHome = "git@github.com:tpetricek"
 
 Target "ReleaseDocs" (fun _ ->
     Repository.clone "" (gitHome + "/FSharp.Formatting.git") "temp/gh-pages"
@@ -251,6 +257,11 @@ Target "ReleaseBinaries" (fun _ ->
     Branches.push "temp/release"
 )
 
+Target "CreateTag" (fun _ ->
+    Branches.tag "" release.NugetVersion
+    Branches.pushTag "" "origin" release.NugetVersion
+)
+
 Target "Release" DoNothing
 
 // --------------------------------------------------------------------------------------
@@ -265,9 +276,10 @@ Target "All" DoNothing
 "UpdateFsxVersions" ==> "All"
 
 "All"
-  ==> "NuGet" 
+  ==> "NuGet"
   ==> "ReleaseDocs"
-  ==> "ReleaseBinaries"
+//  ==> "ReleaseBinaries"
+  ==> "CreateTag"
   ==> "Release"
 
 RunTargetOrDefault "All"

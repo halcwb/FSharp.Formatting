@@ -28,9 +28,13 @@ namespace CSharpFormat
                 int pos = 0;
                 while (m.Success)
                 {
+                    var attrs1 = m.Groups["attrs1"].Value.Trim();
+                    var attrs2 = m.Groups["attrs2"].Value.Trim();
+                    var attrs = attrs1 + ((attrs1.Length > 0 || attrs2.Length > 0) ? " " : "") + attrs2;
+
                     result.Append(input.Substring(pos, m.Index - pos));
-                    result.Append("<pre" + m.Groups["attrs1"].Value + m.Groups["attrs2"].Value + ">");
-                    result.Append(FormatCode(m.Groups["lang"].Value, m.Groups["content"].Value));
+                    result.Append("<pre" + attrs + ">");
+                    result.Append(FormatCode(m.Groups["lang"].Value, m.Groups["content"].Value).Item2);
                     result.Append("</pre>");
                     pos = m.Index + m.Length;
                     m = m.NextMatch();
@@ -44,7 +48,7 @@ namespace CSharpFormat
             }
         }
 
-        public static string FormatCode(string lang, string code)
+        public static Tuple<bool, string> FormatCode(string lang, string code)
         {
             SourceFormat sf = null;
             switch (lang)
@@ -88,11 +92,13 @@ namespace CSharpFormat
                     break;
             }
             if (sf == null)
-                return code;
+            {
+                return Tuple.Create(false, SourceFormat.EscapeHtml(code, tabSpaces: 2));
+            }
             else
             {
                 sf.TabSpaces = 2;
-                return sf.FormatCode(code);
+                return Tuple.Create(true, sf.FormatCode(code));
             }
         }
     }

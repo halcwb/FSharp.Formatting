@@ -29,6 +29,7 @@ open System.IO
 open System.Dynamic
 open System.Collections.Generic
 open System.Collections.Concurrent
+open FSharp.Formatting.Common
 open RazorEngine
 open RazorEngine.Text
 open RazorEngine.Templating
@@ -128,12 +129,12 @@ type [<AbstractClass>] DocPageTemplateBase<'T>() =
 ///
 /// [omit]
 module RazorEngineCache =
-  let cachingProvider =
+  let private cachingProvider =
     let arg =
       if System.AppDomain.CurrentDomain.IsDefaultAppDomain() then
          new System.Action<string>(fun s -> ())
       else null
-    new DefaultCachingProvider(arg) :> ICachingProvider
+    new InvalidatingCachingProvider(arg)
 
   /// Find file in one of the specified layout roots
   let private tryResolve(layoutRoots, name) =
@@ -193,6 +194,15 @@ module RazorEngineCache =
     if (references <> currentReferences) then failwith "cannot use different references for the same layoutRoot"
     engine
 
+  /// Invalidates the given razor template files (does nothing for files which aren't already cached or unknown).
+  /// Use this API only when you know what you are doing. It leaks memory on every call, so you should only use this
+  /// In short lived applications or with an AppDomain recycle strategy in place.
+  let InvalidateCache files =
+    files
+    |> Seq.map (fun file -> PathTemplateKey.Create (file, file))
+    |> Seq.iter cachingProvider.InvalidateCache
+    razorCache.Clear()
+
 /// [omit]
 type RazorRender(layoutRoots, namespaces, template:string, ?references : string list) =
   // template is either a full path or a template name
@@ -213,15 +223,16 @@ type RazorRender(layoutRoots, namespaces, template:string, ?references : string 
     | :? TemplateCompilationException as ex -> 
         let csharp = Path.GetTempFileName() + ".cs"
         File.WriteAllText(csharp, ex.SourceCode)
-        Log.run (fun () ->
-          use _c = Log.colored ConsoleColor.Red
-          printfn "\nProcessing the file '%s' failed\nSource written to: '%s'\nCompilation errors:" source csharp
-          for error in ex.CompilerErrors do
-            let errorType = if error.IsWarning then "warning" else "error"
-            printfn " - %s: (%d, %d) %s" errorType error.Line error.Column error.ErrorText
-          printfn ""
-        )
-        Log.close() // wait for the message to be printed completly
+        let builder = new System.Text.StringBuilder()
+        builder.AppendLine (sprintf "\nProcessing the file '%s' failed\nSource written to: '%s'\nCompilation errors:" source csharp)
+         |> ignore
+        
+        for error in ex.CompilerErrors do
+          let errorType = if error.IsWarning then "warning" else "error"
+          builder.AppendLine (sprintf " - %s: (%d, %d) %s" errorType error.Line error.Column error.ErrorText)
+           |> ignore
+        
+        Log.critf "%s" (builder.ToString())
         failwith "Generating HTML failed."
 
   let withProperties properties (oldViewbag:DynamicViewBag) = 
@@ -249,7 +260,7 @@ type RazorRender(layoutRoots, namespaces, template:string, ?references : string 
       let templateKey =
         match templatePath with
         | Some p -> new PathTemplateKey(templateName, p, ResolveType.Global, null) :> ITemplateKey
-        | None ->  razorEngine.GetKey(templateName)
+        | None -> razorEngine.GetKey(templateName)
       razorEngine.RunCompile(templateKey, modelType, model, x.WithProperties(properties)))
 
 /// [omit]
